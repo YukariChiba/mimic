@@ -20,6 +20,7 @@ struct args {
   union {
     struct run_args {
       const char *ifname, *file;
+      char http_host[128];
       struct filter_list {
         struct filter_node {
           struct filter filter;

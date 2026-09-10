@@ -1,0 +1,19 @@
+[Unit]
+Description = Start Mimic on %i
+After = network.target
+Requires = modprobe@mimic.service
+
+[Service]
+Type = notify
+ExecStart = /usr/bin/mimic run %i -F /etc/mimic/%i.conf
+Restart = on-failure
+
+RuntimeDirectory = mimic
+RuntimeDirectoryMode = 0750
+RuntimeDirectoryPreserve = yes
+
+CapabilityBoundingSet = CAP_SYS_ADMIN CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
+ProtectSystem = strict
+
+[Install]
+WantedBy = multi-user.target
