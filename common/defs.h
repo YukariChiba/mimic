@@ -194,14 +194,20 @@ enum {
   TCP_FLAGS_MASK = 0x00ff0000,
   TCP_GARBAGE_BYTE = 0x01000000,
   TCP_MAX_WINDOW = 0x02000000,
+  TCP_FAKE_HTTP = 0x04000000,
 };
 #else
 enum {
   TCP_FLAGS_MASK = 0x0000ff00,
   TCP_GARBAGE_BYTE = 0x00000001,
   TCP_MAX_WINDOW = 0x00000002,
+  TCP_FAKE_HTTP = 0x00000004,
 };
 #endif
+
+// TTL for injected fake HTTP packets. Small enough that the packet expires on the path and never
+// reaches the peer, so no garbage is delivered to the tunnel endpoints.
+#define FAKE_HTTP_TTL 3
 
 // Reserved for gettext use in the future.
 //

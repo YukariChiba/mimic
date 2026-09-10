@@ -8,6 +8,7 @@
 
 int log_verbosity;
 enum link_type link_type;
+int fake_http_enabled;
 
 struct mimic_whitelist_map mimic_whitelist SEC(".maps");
 struct mimic_conns_map mimic_conns SEC(".maps");

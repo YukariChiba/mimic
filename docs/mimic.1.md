@@ -50,6 +50,11 @@
 `-W, --max-window`
 : Always use maximum window size in TCP packets.
 
+`--http-host=HOSTNAME`
+: Inject a fake HTTP GET request (with `Host: HOSTNAME`) right after the TCP handshake completes,
+: so that the connection is disguised as HTTP traffic for QoS classifiers. The injected packet uses
+: a fixed TTL of 3, meaning it expires on the path and never reaches the peer.
+
 `-F, --file=PATH`
 : Load configuration from file
 
@@ -127,6 +132,9 @@ See **/usr/share/doc/mimic/eth0.conf.example** for detailed examples.
 
 `link_type`, `xdp_mode`, `use_libxdp`, `handshake`, `keepalive`, `padding`, `max_window`
 : See [**OPTIONS**](#options).
+
+`http_host`
+: Hostname used as the `Host` header of the injected fake HTTP GET request. See `--http-host`.
 
 `filter`
 : See [**Filters**](#filters). This option may be specified more than once.

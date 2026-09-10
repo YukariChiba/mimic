@@ -1,5 +1,11 @@
 # Changelog for Mimic
 
+## Unreleased
+
+- Add `--http-host` option (config key `http_host`) to inject a fake HTTP GET request right after
+  the fake TCP handshake, disguising the connection as HTTP to bypass QoS. The injected packet has a
+  fixed TTL of 3 so it expires on the path and never reaches the peer.
+
 ## 0.7.1 (2026-06-04)
 
 - Allow unaligned memory access in BPF, fixing running on riscv64, etc.

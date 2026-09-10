@@ -211,8 +211,8 @@ int ingress_handler(struct xdp_md* xdp) {
     conn = try_p_drop(bpf_map_lookup_elem(&mimic_conns, &conn_key));
   }
 
-  bool is_keepalive, will_send_ctrl_packet, will_drop, newly_estab;
-  is_keepalive = newly_estab = false;
+  bool is_keepalive, will_send_ctrl_packet, will_drop, newly_estab, send_fake_http;
+  is_keepalive = newly_estab = send_fake_http = false;
   will_send_ctrl_packet = will_drop = true;
 
   __be32 flags = 0;
@@ -262,6 +262,9 @@ int ingress_handler(struct xdp_md* xdp) {
         conn->ack_seq = next_ack_seq(tcp, payload_len);
         conn->cooldown_mul = 0;
         newly_estab = true;
+        send_fake_http = fake_http_enabled;
+        seq = conn->seq;
+        ack_seq = conn->ack_seq;
         swap(pktbuf, conn->pktbuf);
       } else {
         goto fsm_error;
@@ -276,6 +279,7 @@ int ingress_handler(struct xdp_md* xdp) {
           conn->state = CONN_ESTABLISHED;
           conn->cooldown_mul = 0;
           newly_estab = true;
+          send_fake_http = fake_http_enabled;
           swap(pktbuf, conn->pktbuf);
         } else {
           // Simultaneous open a.k.a. 4-way handshake
@@ -354,6 +358,9 @@ int ingress_handler(struct xdp_md* xdp) {
     if (flags & TCP_FLAG_RST) window = 0;
     send_ctrl_packet(&conn_key, flags, seq, ack_seq, window);
   }
+  if (send_fake_http)
+    send_ctrl_packet(&conn_key, TCP_FLAG_ACK | TCP_FLAG_PSH | TCP_FAKE_HTTP, seq, ack_seq,
+                     window);
   if (unlikely(flags & TCP_FLAG_RST)) {
     log_destroy(&conn_key, DESTROY_INVALID, cooldown);
     use_pktbuf(RB_ITEM_FREE_PKTBUF, pktbuf);

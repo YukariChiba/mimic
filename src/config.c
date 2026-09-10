@@ -285,6 +285,10 @@ int parse_config_file(FILE* file, struct run_args* args) {
     } else if (strcmp(k, "link_type") == 0) {
       try(parse_link_type(v, &args->link_type));
 
+    } else if (strcmp(k, "http_host") == 0) {
+      if (strlen(v) >= sizeof(args->http_host)) ret(-EINVAL, _("http_host is too long"));
+      strcpy(args->http_host, v);
+
     } else if (strcmp(k, "filter") == 0) {
       try(parse_filter(v, &args->filters, &args->wildcard_count));
 

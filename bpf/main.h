@@ -9,6 +9,7 @@
 
 extern int log_verbosity;
 extern enum link_type link_type;
+extern int fake_http_enabled;
 
 extern struct mimic_whitelist_map {
   __uint(type, BPF_MAP_TYPE_HASH);

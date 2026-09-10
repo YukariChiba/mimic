@@ -43,6 +43,14 @@
 
 #include "bpf_skel.h"
 
+static const char http_get_fmt[] =
+  "GET / HTTP/1.1\r\n"
+  "Host: %s\r\n"
+  "Accept: */*\r\n"
+  "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+  "(KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36\r\n"
+  "\r\n";
+
 static const struct argp_option options[] = {
   {"verbose", 'v', NULL, 0, N_("Output more information"), 0},
   {"quiet", 'q', NULL, 0, N_("Output less information"), 0},
@@ -64,6 +72,10 @@ static const struct argp_option options[] = {
   {"padding", 'p', N_("bytes"), 0,
    N_("Padding size appended to each packet. Pass 'random' to use random padding."), 2},
   {"max-window", 'W', NULL, 0, N_("Always use maximum window size in TCP packets"), 2},
+  {"http-host", 0xfffe, N_("HOSTNAME"), 0,
+   N_("Inject a fake HTTP GET request (Host: HOSTNAME) right after handshake to disguise the "
+      "connection as HTTP"),
+   2},
   {"file", 'F', N_("PATH"), 0, N_("Load configuration from file"), 3},
   {"check", 0xffff, NULL, 0, N_("Check if Mimic could be deployed, and exit"), 4},
   {},
@@ -88,6 +100,10 @@ static inline error_t args_parse_opt(int key, char* arg, struct argp_state* stat
     case 'k': try(parse_keepalive(arg, &args->gsettings.keepalive)); break;
     case 'p': try(parse_padding(arg, &args->gsettings.padding)); break;
     case 'W': args->gsettings.max_window = true; break;
+    case 0xfffe:
+      if (strlen(arg) >= sizeof(args->http_host)) ret(-EINVAL, _("http_host is too long"));
+      strcpy(args->http_host, arg);
+      break;
     case 'F': args->file = arg; break;
     case 0xffff: args->check = true; break;
     case ARGP_KEY_ARG:
@@ -138,7 +154,8 @@ static inline int tc_hook_create_attach(struct bpf_tc_hook* hook, struct bpf_tc_
 
 // This function is somewhat heavy (see comments below), and is called often. Probably does
 // not really matter since this is not performance-critical either.
-static int handle_send_ctrl_packet(struct send_options* s, const char* ifname) {
+static int handle_send_ctrl_packet(struct send_options* s, const char* ifname,
+                                   const char* http_host) {
   // We don't store raw socket because if we do, kernel will forward all TCP traffic to it.
   //
   // Maybe setting reception buffer size to 0 will help, but it's just prevent packets from storing
@@ -168,10 +185,20 @@ static int handle_send_ctrl_packet(struct send_options* s, const char* ifname) {
   bool syn = s->flags & TCP_FLAG_SYN;
   bool garbage_byte = s->flags & TCP_GARBAGE_BYTE;
   bool max_window = s->flags & TCP_MAX_WINDOW;
+  bool fake_http = s->flags & TCP_FAKE_HTTP;
+
+  char http_buf[512];
+  size_t http_len = 0;
+  if (fake_http) {
+    if (!http_host || !http_host[0]) return -EINVAL;
+    int n = snprintf(http_buf, sizeof(http_buf), http_get_fmt, http_host);
+    if (n < 0 || (size_t)n >= sizeof(http_buf)) return -E2BIG;
+    http_len = (size_t)n;
+  }
 
   // TCP header + (MSS + window scale + SACK PERM) if SYN
   size_t header_len = sizeof(struct tcphdr) + (syn ? 3 * 4 : 0);
-  size_t buf_len = header_len + garbage_byte;
+  size_t buf_len = header_len + garbage_byte + http_len;
   csum += buf_len;
 
   void* buf raii(freep) = malloc(buf_len);
@@ -215,12 +242,20 @@ static int handle_send_ctrl_packet(struct send_options* s, const char* ifname) {
   // TODO: fill with random byte
   if (garbage_byte) ((__u8*)buf)[buf_len - 1] = 0;
 
+  if (http_len) memcpy((__u8*)buf + header_len + garbage_byte, http_buf, http_len);
+
+  if (fake_http) {
+    int ttl = FAKE_HTTP_TTL;
+    int ttl_opt = ip_proto(&s->conn.local) == AF_INET6 ? IPV6_UNICAST_HOPS : IP_TTL;
+    try_e(setsockopt(sk, level, ttl_opt, &ttl, sizeof(ttl)), _("failed to set TTL: %s"), strret);
+  }
+
   csum += calc_csum(buf, buf_len);
   tcp->check = htons(csum_fold(csum));
 
   try_e(sendto(sk, buf, buf_len, 0, (struct sockaddr*)&daddr, sizeof(daddr)),
         _("failed to send: %s"), strret);
-  log_tcp(LOG_TRACE, &s->conn, tcp, 0);
+  log_tcp(LOG_TRACE, &s->conn, tcp, http_len);
   return 0;
 }
 
@@ -233,7 +268,7 @@ static inline int send_ctrl_packet(struct conn_tuple* conn, __be32 flags, __u32 
     .ack_seq = ack_seq,
     .window = window,
   };
-  return handle_send_ctrl_packet(&s, ifname);
+  return handle_send_ctrl_packet(&s, ifname, NULL);
 }
 
 static int store_packet(struct bpf_map* conns, struct conn_tuple* conn_key, const char* data,
@@ -264,8 +299,8 @@ cleanup:
   return retcode;
 }
 
-static int _handle_rb_event(struct bpf_map* conns, const char* ifname, void* ctx, void* data,
-                            size_t data_sz) {
+static int _handle_rb_event(struct bpf_map* conns, const char* ifname, const char* http_host,
+                            void* ctx, void* data, size_t data_sz) {
   UNUSED(ctx);
   struct rb_item* item = data;
   struct conn_tuple* conn = &item->store_packet.conn_key;
@@ -279,7 +314,7 @@ static int _handle_rb_event(struct bpf_map* conns, const char* ifname, void* ctx
       break;
     case RB_ITEM_SEND_OPTIONS:
       name = N_("sending control packets");
-      ret = handle_send_ctrl_packet(&item->send_options, ifname);
+      ret = handle_send_ctrl_packet(&item->send_options, ifname, http_host);
       break;
     case RB_ITEM_STORE_PACKET:
       name = N_("storing packet");
@@ -320,13 +355,14 @@ static ffi_type* _handle_rb_event_args[] = {
 struct handle_rb_event_ctx {
   struct bpf_map* conns;
   const char* ifname;
+  const char* http_host;
 };
 
 static void _handle_rb_event_binding(ffi_cif* cif, void* ret, void** args, void* _ctx) {
   UNUSED(cif);
   struct handle_rb_event_ctx* ctx = (typeof(ctx))_ctx;
-  *(int*)ret = _handle_rb_event(ctx->conns, ctx->ifname, *(void**)args[0], *(void**)args[1],
-                                *(size_t*)args[2]);
+  *(int*)ret = _handle_rb_event(ctx->conns, ctx->ifname, ctx->http_host, *(void**)args[0],
+                                *(void**)args[1], *(size_t*)args[2]);
 }
 
 static ring_buffer_sample_fn handle_rb_event(struct handle_rb_event_ctx* ctx, ffi_cif* cif,
@@ -526,6 +562,7 @@ static inline int run_bpf(struct run_args* args, int lock_fd, const char* ifname
 
   skel->bss->log_verbosity = log_verbosity;
   skel->bss->link_type = args->link_type;
+  skel->bss->fake_http_enabled = args->http_host[0] != '\0';
 
   bpf_program__set_flags(skel->progs.ingress_handler, BPF_F_ANY_ALIGNMENT);
   bpf_program__set_flags(skel->progs.egress_handler, BPF_F_ANY_ALIGNMENT);
@@ -576,7 +613,8 @@ static inline int run_bpf(struct run_args* args, int lock_fd, const char* ifname
   struct bpf_map_info map_info = {};
   __u32 prog_len = sizeof(prog_info), map_len = sizeof(map_info);
   _get_map_id(mimic_rb);
-  struct handle_rb_event_ctx ctx = {.conns = skel->maps.mimic_conns, .ifname = ifname};
+  struct handle_rb_event_ctx ctx = {
+    .conns = skel->maps.mimic_conns, .ifname = ifname, .http_host = args->http_host};
   rb = try2_p(ring_buffer__new(mimic_rb_fd, handle_rb_event(&ctx, &cif, &closure), NULL, NULL),
               _("failed to attach BPF ring buffer '%s': %s"), "mimic_rb", strret);
 
